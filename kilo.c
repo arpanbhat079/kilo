@@ -722,40 +722,51 @@ void editorInsertChar(int c) {
 
 /* Inserting a newline is slightly complex as we have to handle inserting a
  * newline in the middle of a line, splitting the line as needed. */
-void editorInsertNewline(void) {
-    int filerow = E.rowoff+E.cy;
-    int filecol = E.coloff+E.cx;
-    erow *row = (filerow >= E.numrows) ? NULL : &E.row[filerow];
+void editorInsertNewline() {
+    erow *row = &E.row[E.cy];
 
-    if (!row) {
-        if (filerow == E.numrows) {
-            editorInsertRow(filerow,"",0);
-            goto fixcursor;
-        }
-        return;
+    // 1) Compute how many leading chars (spaces or tabs) the current line has
+    int indent_len = 0;
+    while (indent_len < row->size &&
+          (row->chars[indent_len] == ' ' || row->chars[indent_len] == '\t')) {
+        indent_len++;
     }
-    /* If the cursor is over the current line size, we want to conceptually
-     * think it's just over the last character. */
-    if (filecol >= row->size) filecol = row->size;
-    if (filecol == 0) {
-        editorInsertRow(filerow,"",0);
+
+    // 2) Copy exactly those indent chars
+    char *indent_str = malloc(indent_len);
+    memcpy(indent_str, row->chars, indent_len);
+
+    if (E.cx == 0) {
+        // blank-split: new line is just the indent
+        editorInsertRow(E.cy + 1, indent_str, indent_len);
     } else {
-        /* We are in the middle of a line. Split it between two rows. */
-        editorInsertRow(filerow+1,row->chars+filecol,row->size-filecol);
-        row = &E.row[filerow];
-        row->chars[filecol] = '\0';
-        row->size = filecol;
-        editorUpdateRow(row);
+        // split at cursor: remainder goes after the indent
+        int rem_len = row->size - E.cx;
+        char *rem_str = malloc(rem_len);
+        memcpy(rem_str, &row->chars[E.cx], rem_len);
+
+        // build the new line buffer
+        char *new_line = malloc(indent_len + rem_len);
+        memcpy(new_line, indent_str, indent_len);
+        memcpy(new_line + indent_len, rem_str, rem_len);
+
+        editorInsertRow(E.cy + 1, new_line, indent_len + rem_len);
+
+        // shrink the current row to the left of cursor
+        row->size = E.cx;
+        row->chars[row->size] = '\0';
+
+        free(rem_str);
+        free(new_line);
     }
-fixcursor:
-    if (E.cy == E.screenrows-1) {
-        E.rowoff++;
-    } else {
-        E.cy++;
-    }
-    E.cx = 0;
-    E.coloff = 0;
+
+    free(indent_str);
+
+    // 3) move cursor onto the new line, just after that same indent
+    E.cy++;
+    E.cx = indent_len;
 }
+
 
 /* Delete the char at the current prompt position. */
 void editorDelChar(void) {
@@ -1288,21 +1299,41 @@ void initEditor(void) {
     signal(SIGWINCH, handleSigWinCh);
 }
 
-int main(int argc, char **argv) {
-    if (argc != 2) {
-        fprintf(stderr,"Usage: kilo <filename>\n");
-        exit(1);
+#include <unistd.h>     /* for STDIN_FILENO */
+
+/* Forward‐declare die so the call in main() knows its signature */
+void die(const char *s){
+    /* clear screen */
+    write(STDOUT_FILENO, "\x1b[2J", 4);
+    write(STDOUT_FILENO, "\x1b[H", 3);
+
+    perror(s);
+    exit(1);
+}
+
+int main(int argc, char *argv[]) {
+    /* 1) enable raw mode on stdin */
+    if (enableRawMode(STDIN_FILENO) == -1)
+        die("enableRawMode");
+
+    /* 2) initialize the core editor state */
+    initEditor();
+
+    /* 3) if user passed a filename, open it */
+    if (argc >= 2) {
+        editorOpen(argv[1]);
+        /* syntax for each row is already updated inside editorOpen() */
     }
 
-    initEditor();
-    editorSelectSyntaxHighlight(argv[1]);
-    editorOpen(argv[1]);
-    enableRawMode(STDIN_FILENO);
     editorSetStatusMessage(
-        "HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find");
-    while(1) {
+      "HELP: Ctrl‑S = save | Ctrl‑Q = quit | Ctrl‑F = find"
+    );
+
+    /* 4) main input loop, passing stdin FD */
+    while (1) {
         editorRefreshScreen();
         editorProcessKeypress(STDIN_FILENO);
     }
+
     return 0;
 }
